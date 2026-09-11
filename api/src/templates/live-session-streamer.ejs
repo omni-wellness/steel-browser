@@ -675,7 +675,21 @@
                   }
 
                   // For regular tabs, handle data
-                  if (payload.type === "tabUpdate") {
+                  if (payload.type === "selectedTextResponse") {
+                      if (payload.text && payload.text.length > 0) {
+                          const requestId = ++clipboardRequestId;
+                          pendingRequests.set(requestId, { type: 'write', text: payload.text });
+
+                          window.parent.postMessage({
+                              type: 'requestClipboardWrite',
+                              text: payload.text,
+                              requestId: requestId
+                          }, '*');
+                      } else {
+                          console.log('No text selected in browser');
+                      }
+                      return;
+                  } else if (payload.type === "tabUpdate") {
                       updateTabInfo(pageId, payload.url, payload.title, payload.favicon);
                       return;
                   } else if (payload.type === "targetClosed") {
@@ -1055,44 +1069,15 @@
                           type: 'mouseMoved',
                           x: coords.x,
                           y: coords.y,
-                          button: 'none',
+                          button: (e.buttons & 1) ? 'left' : (e.buttons & 4) ? 'middle' : (e.buttons & 2) ? 'right' : 'none',
+                          buttons: e.buttons,
                           modifiers: (e.ctrlKey ? 2 : 0) | (e.shiftKey ? 8 : 0) | (e.altKey ? 1 : 0) | (e.metaKey ? 4 : 0)
                       }
                   }));
               };
-
-              // Debounce function to limit how often events are sent
-              function debounce(func, wait) {
-                  let timeout;
-                  return function(...args) {
-                      const context = this;
-                      clearTimeout(timeout);
-                      timeout = setTimeout(() => func.apply(context, args), wait);
-                  };
-              }
-
-              // Create debounced version of mouseMoveHandler
-              canvas._debouncedMouseMoveHandler = debounce((e) => {
-                  if (ws.readyState !== WebSocket.OPEN) return;
-
-                  const coords = getScaledCoordinates(e, canvas, pageId);
-
-                  ws.send(JSON.stringify({
-                      type: 'mouseEvent',
-                      pageId: pageId,
-                      event: {
-                          type: 'mouseMoved',
-                          x: coords.x,
-                          y: coords.y,
-                          button: 'none',
-                          modifiers: (e.ctrlKey ? 2 : 0) | (e.shiftKey ? 8 : 0) | (e.altKey ? 1 : 0) | (e.metaKey ? 4 : 0)
-                      }
-                  }));
-              }, 20); // 20ms debounce time - adjust as needed for performance vs responsiveness
-
-              // Attach the debounced handler to mousemove event
-              canvas.addEventListener('mousemove', canvas._debouncedMouseMoveHandler);
-
+              // Preserve input ordering while dragging. A trailing debounce can
+              // dispatch mouseup before the final held-button mousemove.
+              canvas.addEventListener('mousemove', canvas._mouseMoveHandler);
               // Wheel event
               canvas._wheelHandler = (e) => {
                   if (ws.readyState !== WebSocket.OPEN) return;
@@ -1136,15 +1121,17 @@
                   const ws = tabs[activeTabId].websocket;
                   if (ws.readyState !== WebSocket.OPEN) return;
 
+                  e.preventDefault();
                   ws.send(JSON.stringify({
                       type: 'keyEvent',
                       pageId: activeTabId,
                       event: {
                           type: 'keyDown',
-                          text: e.key.length === 1 ? e.key : undefined,
+                          text: (e.ctrlKey || e.metaKey || e.altKey) ? undefined : (e.key.length === 1 ? e.key : undefined),
                           code: e.code,
                           key: e.key,
-                          keyCode: e.keyCode
+                          keyCode: e.keyCode,
+                          modifiers: (e.ctrlKey ? 2 : 0) | (e.shiftKey ? 8 : 0) | (e.altKey ? 1 : 0) | (e.metaKey ? 4 : 0)
                       }
                   }));
               });
@@ -1162,10 +1149,11 @@
                       pageId: activeTabId,
                       event: {
                           type: 'keyUp',
-                          text: e.key.length === 1 ? e.key : undefined,
+                          text: (e.ctrlKey || e.metaKey || e.altKey) ? undefined : (e.key.length === 1 ? e.key : undefined),
                           code: e.code,
                           key: e.key,
-                          keyCode: e.keyCode
+                          keyCode: e.keyCode,
+                          modifiers: (e.ctrlKey ? 2 : 0) | (e.shiftKey ? 8 : 0) | (e.altKey ? 1 : 0) | (e.metaKey ? 4 : 0)
                       }
                   }));
               });
@@ -1676,36 +1664,6 @@
               }, true);
           })();
 
-          const originalConnectTabWebSocket = connectTabWebSocket;
-          connectTabWebSocket = function(pageId) {
-              const ws = originalConnectTabWebSocket(pageId);
-
-              const originalOnMessage = ws.onmessage;
-              ws.onmessage = function(event) {
-                  const payload = JSON.parse(event.data);
-
-                  if (payload.type === "selectedTextResponse") {
-
-                      if (payload.text && payload.text.length > 0) {
-                          const requestId = ++clipboardRequestId;
-                          pendingRequests.set(requestId, { type: 'write', text: payload.text });
-
-                          window.parent.postMessage({
-                              type: 'requestClipboardWrite',
-                              text: payload.text,
-                              requestId: requestId
-                          }, '*');
-                      } else {
-                          console.log('No text selected in browser');
-                      }
-                      return;
-                  }
-
-                  originalOnMessage.call(this, event);
-              };
-
-              return ws;
-          };
     })();
     </script>
 </body>

@@ -286,7 +286,16 @@ export class CDPService extends EventEmitter {
   public unregisterPlugin(pluginName: string) {
     return this.pluginManager.unregister(pluginName);
   }
-
+  private targetWasClosed(error: unknown, page?: Page): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return Boolean(
+      page?.isClosed() ||
+        (error instanceof Error && error.name === "TargetCloseError") ||
+        message.includes("No target with given id found") ||
+        message.includes("Target closed") ||
+        message.includes("Session closed"),
+    );
+  }
   private async handleTargetChange(target: Target) {
     if (target.type() !== "page") return;
 
@@ -1016,8 +1025,20 @@ export class CDPService extends EventEmitter {
           },
           "Failed to configure download behavior",
         );
-
-        this.browserInstance.on("targetcreated", this.handleNewTarget.bind(this));
+        this.browserInstance.on("targetcreated", (target) => {
+          void this.handleNewTarget(target).catch((error) => {
+            if (this.targetWasClosed(error)) {
+              this.logger.debug(
+                `[CDPService] Target closed while asynchronous target setup was in flight`,
+              );
+              return;
+            }
+            this.logger.error(
+              { err: error },
+              `[CDPService] Error handling asynchronous target setup`,
+            );
+          });
+        });
         this.browserInstance.on("targetchanged", this.handleTargetChange.bind(this));
         this.browserInstance.on("targetdestroyed", (target) => {
           const targetId = (target as any)._targetId;
@@ -1492,9 +1513,21 @@ export class CDPService extends EventEmitter {
       );
     } catch (error) {
       this.logger.error({ error }, `[Fingerprint] Error injecting fingerprint safely`);
+      if (this.targetWasClosed(error, page)) {
+        this.logger.debug("[Fingerprint] Target closed before fingerprint injection completed");
+        return;
+      }
       const fingerprintInjector = new FingerprintInjector();
-      // @ts-ignore - Ignore type mismatch between puppeteer versions
-      await fingerprintInjector.attachFingerprintToPuppeteer(page, fingerprintData);
+      try {
+        // @ts-ignore - Ignore type mismatch between puppeteer versions
+        await fingerprintInjector.attachFingerprintToPuppeteer(page, fingerprintData);
+      } catch (fallbackError) {
+        if (this.targetWasClosed(fallbackError, page)) {
+          this.logger.debug("[Fingerprint] Target closed during fallback fingerprint injection");
+          return;
+        }
+        throw fallbackError;
+      }
     }
   }
 
@@ -1509,8 +1542,13 @@ export class CDPService extends EventEmitter {
     }
 
     const userAgent = this.getUserAgent() ?? "";
-    const session = await page.createCDPSession();
+    let session: CDPSession | null = null;
     try {
+      if (page.isClosed()) {
+        this.logger.debug("[CDPService] Target closed before device metrics setup");
+        return;
+      }
+      session = await page.createCDPSession();
       await session.send("Page.setDeviceMetricsOverride", {
         screenWidth: screen.width,
         screenHeight: screen.height,
@@ -1524,8 +1562,14 @@ export class CDPService extends EventEmitter {
             : { angle: 90, type: "landscapePrimary" },
         deviceScaleFactor: screen.devicePixelRatio,
       });
+    } catch (error) {
+      if (this.targetWasClosed(error, page)) {
+        this.logger.debug("[CDPService] Target closed during device metrics setup");
+        return;
+      }
+      throw error;
     } finally {
-      await session.detach().catch(() => {});
+      await session?.detach().catch(() => {});
     }
   }
 

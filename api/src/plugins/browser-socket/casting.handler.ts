@@ -303,7 +303,7 @@ export async function handleCastSession(
                   x: event.x,
                   y: event.y,
                   button: event.button,
-                  buttons: event.button === "none" ? 0 : 1,
+                  buttons: event.buttons ?? (event.button === "none" ? 0 : 1),
                   clickCount: event.clickCount || 1,
                   modifiers: event.modifiers || 0,
                   deltaX: event.deltaX,
@@ -344,8 +344,23 @@ export async function handleCastSession(
               case "getSelectedText": {
                 try {
                   const selectedText = await targetPage.evaluate(() => {
-                    const selection = window.getSelection();
-                    return selection ? selection.toString() : "";
+                    const selection = window.getSelection()?.toString() ?? "";
+                    if (selection) {
+                      return selection;
+                    }
+
+                    const activeElement = document.activeElement;
+                    if (
+                      activeElement instanceof HTMLInputElement ||
+                      activeElement instanceof HTMLTextAreaElement
+                    ) {
+                      const start = activeElement.selectionStart;
+                      const end = activeElement.selectionEnd;
+                      if (start !== null && end !== null && end > start) {
+                        return activeElement.value.slice(start, end);
+                      }
+                    }
+                    return "";
                   });
 
                   // Send the selected text back to the client
