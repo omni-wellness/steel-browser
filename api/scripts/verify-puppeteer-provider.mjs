@@ -24,8 +24,8 @@ for (let depth = 0; depth < 12; depth += 1) {
     if (error?.code !== "ENOENT") {
       throw error;
     }
-    packageDirectory = dirname(packageDirectory);
   }
+  packageDirectory = dirname(packageDirectory);
 }
 assert.ok(packageBody, "could not locate the installed puppeteer-core package metadata");
 assert.equal(packageBody.name, providers[expected].name);
