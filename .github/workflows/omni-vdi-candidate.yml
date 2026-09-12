@@ -1,0 +1,164 @@
+name: Omni VDI runtime candidate
+
+on:
+  push:
+    branches:
+      - omni/vdi-runtime-v1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: omni-vdi-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    name: Compatibility (${{ matrix.provider }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [puppeteer, rebrowser]
+    steps:
+      - name: Check out the pinned fork revision
+        uses: actions/checkout@v4
+
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Select vanilla control dependency
+        if: matrix.provider == 'puppeteer'
+        run: |
+          npm pkg set dependencies.puppeteer-core=23.6.0 --workspace=@steel-browser/api
+          npm install --package-lock-only --ignore-scripts
+
+      - name: Install the locked workspace
+        env:
+          HUSKY: "0"
+        run: npm ci
+
+      - name: Verify the provider and package-compatible API
+        env:
+          PUPPETEER_PROVIDER: ${{ matrix.provider }}
+        run: node api/scripts/verify-puppeteer-provider.mjs
+
+      - name: Run the Steel API tests
+        run: npm test -w api
+
+      - name: Compile the Steel API and viewer
+        run: npm run build
+
+  image:
+    name: Build, scan, smoke, and publish candidate
+    needs: compatibility
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/omni-wellness/steel-browser:omni-vdi-${{ github.sha }}
+    steps:
+      - name: Check out the tested fork revision
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the linux/amd64 candidate
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/omni-wellness/steel-browser
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Verify the installed runtime inside the image
+        run: |
+          docker run --rm --entrypoint node "$IMAGE" -e "const p=require('/app/node_modules/puppeteer-core/package.json'); if(p.name!=='rebrowser-puppeteer-core'||p.version!=='23.6.101') process.exit(1);"
+
+      - name: Scan the candidate
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: json
+          output: /tmp/steel-rebrowser-trivy.json
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Record the candidate SBOM
+        run: syft "$IMAGE" -o cyclonedx-json=/tmp/steel-rebrowser-sbom.cdx.json
+
+      - name: Smoke headed Chromium, CDP, and session lifecycle
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker logs steel-rebrowser-smoke > /tmp/steel-rebrowser-smoke.log 2>&1 || true
+            docker rm -f steel-rebrowser-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name steel-rebrowser-smoke \
+            -p 127.0.0.1:3100:3000 \
+            -p 127.0.0.1:9224:9223 \
+            -e CHROME_HEADLESS=false \
+            -e DEFAULT_TIMEZONE=America/New_York \
+            -e LANG=en_US.UTF-8 \
+            -e 'CHROME_ARGS=--lang=en-US --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp' \
+            --entrypoint /sbin/tini \
+            "$IMAGE" -g -- /bin/sh -c \
+            'Xvfb :10 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & sleep 0.2; exec /app/api/entrypoint.sh'
+          ready=false
+          for _attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3100/v1/health >/tmp/steel-health.json \
+              && curl --fail --silent http://127.0.0.1:9224/json/version >/tmp/steel-cdp.json; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          "$ready"
+          jq -e '.status == "ok"' /tmp/steel-health.json >/dev/null
+          jq -e '.webSocketDebuggerUrl | startswith("ws://")' /tmp/steel-cdp.json >/dev/null
+          curl --fail --silent \
+            -H 'content-type: application/json' \
+            --data '{"headless":false,"skipFingerprintInjection":true,"timezone":"America/New_York","dimensions":{"width":1920,"height":1080},"deviceConfig":{"device":"desktop"}}' \
+            http://127.0.0.1:3100/v1/sessions >/tmp/steel-session.json
+          jq -e '.id and (.status == "live" or .status == "idle") and .websocketUrl and .debugUrl' \
+            /tmp/steel-session.json >/dev/null
+          session_id=$(jq -er '.id' /tmp/steel-session.json)
+          curl --fail --silent --request POST \
+            "http://127.0.0.1:3100/v1/sessions/${session_id}/release" >/tmp/steel-release.json
+          jq -e '.success == true and .status == "released"' /tmp/steel-release.json >/dev/null
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the gated candidate
+        run: |
+          docker push "$IMAGE"
+          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE" > /tmp/steel-rebrowser-image.txt
+
+      - name: Upload immutable evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: steel-rebrowser-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            /tmp/steel-rebrowser-image.txt
+            /tmp/steel-rebrowser-sbom.cdx.json
+            /tmp/steel-rebrowser-smoke.log
+            /tmp/steel-rebrowser-trivy.json
