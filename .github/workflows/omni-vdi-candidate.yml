@@ -140,6 +140,12 @@ jobs:
           echo "Vanilla HIGH/CRITICAL findings: $(wc -l < /tmp/steel-vanilla-findings.txt)"
           echo "Rebrowser-only HIGH/CRITICAL findings: $(wc -l < /tmp/steel-rebrowser-new-findings.txt)"
           echo "Rebrowser CRITICAL findings: $critical_count"
+          jq -r '
+            .Results[]?.Vulnerabilities[]?
+            | select(.Severity == "CRITICAL")
+            | [.VulnerabilityID, .PkgName, .InstalledVersion, .FixedVersion]
+            | @tsv
+          ' /tmp/steel-rebrowser-trivy.json | sort -u | sed 's/^/critical: /'
           if [[ -s /tmp/steel-rebrowser-new-findings.txt ]]; then
             echo "::error::Rebrowser introduces HIGH/CRITICAL findings absent from the vanilla control."
             sed 's/^/new: /' /tmp/steel-rebrowser-new-findings.txt
@@ -149,6 +155,18 @@ jobs:
             echo "::error::Rebrowser candidate contains CRITICAL findings."
             exit 1
           fi
+
+      - name: Upload security ablation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steel-security-ablation-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            /tmp/steel-rebrowser-trivy.json
+            /tmp/steel-vanilla-trivy.json
+            /tmp/steel-rebrowser-new-findings.txt
 
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
