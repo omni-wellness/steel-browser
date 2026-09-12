@@ -227,6 +227,27 @@ jobs:
           docker push "$IMAGE"
           docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE" > /tmp/steel-rebrowser-image.txt
 
+      - name: Keep the public-source image anonymously pullable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH \
+            "/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/steel-browser" \
+            -f visibility=public \
+            >/dev/null
+          anonymous_token="$(
+            curl --fail --silent --show-error \
+              "https://ghcr.io/token?scope=repository:${GITHUB_REPOSITORY_OWNER}/steel-browser:pull" \
+              | jq -er '.token'
+          )"
+          image_digest="$(cut -d@ -f2 /tmp/steel-rebrowser-image.txt)"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${anonymous_token}" \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${GITHUB_REPOSITORY_OWNER}/steel-browser/manifests/${image_digest}" \
+            >/dev/null
+
       - name: Upload immutable evidence
         uses: actions/upload-artifact@v4
         with:
