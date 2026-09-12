@@ -82,15 +82,73 @@ jobs:
         run: |
           docker run --rm --entrypoint node "$IMAGE" -e "const p=require('/app/node_modules/puppeteer-core/package.json'); if(p.name!=='rebrowser-puppeteer-core'||p.version!=='23.6.101') process.exit(1);"
 
-      - name: Scan the candidate
+      - name: Record the Rebrowser candidate scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}
           format: json
           output: /tmp/steel-rebrowser-trivy.json
-          exit-code: "1"
+          exit-code: "0"
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          scanners: vuln
+
+      - name: Build the vanilla Puppeteer security control
+        run: |
+          npm pkg set dependencies.puppeteer-core=23.6.0 --workspace=@steel-browser/api
+          npm install --package-lock-only --ignore-scripts
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --tag steel-vanilla-control:${{ github.sha }} \
+            .
+
+      - name: Record the vanilla Puppeteer control scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: steel-vanilla-control:${{ github.sha }}
+          format: json
+          output: /tmp/steel-vanilla-trivy.json
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          scanners: vuln
+
+      - name: Require no new high findings and no critical findings
+        run: |
+          set -euo pipefail
+          findings() {
+            jq -r '
+              [.Results[]?.Vulnerabilities[]?
+                | select(.Severity == "HIGH" or .Severity == "CRITICAL")
+                | [.VulnerabilityID, .PkgName, .InstalledVersion]
+                | @tsv]
+              | unique[]
+            ' "$1" | sort
+          }
+          findings /tmp/steel-rebrowser-trivy.json > /tmp/steel-rebrowser-findings.txt
+          findings /tmp/steel-vanilla-trivy.json > /tmp/steel-vanilla-findings.txt
+          comm -23 \
+            /tmp/steel-rebrowser-findings.txt \
+            /tmp/steel-vanilla-findings.txt \
+            > /tmp/steel-rebrowser-new-findings.txt
+          critical_count="$(
+            jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' \
+              /tmp/steel-rebrowser-trivy.json
+          )"
+          echo "Rebrowser HIGH/CRITICAL findings: $(wc -l < /tmp/steel-rebrowser-findings.txt)"
+          echo "Vanilla HIGH/CRITICAL findings: $(wc -l < /tmp/steel-vanilla-findings.txt)"
+          echo "Rebrowser-only HIGH/CRITICAL findings: $(wc -l < /tmp/steel-rebrowser-new-findings.txt)"
+          echo "Rebrowser CRITICAL findings: $critical_count"
+          if [[ -s /tmp/steel-rebrowser-new-findings.txt ]]; then
+            echo "::error::Rebrowser introduces HIGH/CRITICAL findings absent from the vanilla control."
+            sed 's/^/new: /' /tmp/steel-rebrowser-new-findings.txt
+            exit 1
+          fi
+          if (( critical_count > 0 )); then
+            echo "::error::Rebrowser candidate contains CRITICAL findings."
+            exit 1
+          fi
 
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
@@ -162,3 +220,5 @@ jobs:
             /tmp/steel-rebrowser-sbom.cdx.json
             /tmp/steel-rebrowser-smoke.log
             /tmp/steel-rebrowser-trivy.json
+            /tmp/steel-vanilla-trivy.json
+            /tmp/steel-rebrowser-new-findings.txt
