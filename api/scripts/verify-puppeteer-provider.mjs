@@ -15,8 +15,11 @@ let packageDirectory = dirname(fileURLToPath(import.meta.resolve("puppeteer-core
 let packageBody;
 for (let depth = 0; depth < 12; depth += 1) {
   try {
-    packageBody = JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8"));
-    break;
+    const candidate = JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8"));
+    if (candidate.name && candidate.version) {
+      packageBody = candidate;
+      break;
+    }
   } catch (error) {
     if (error?.code !== "ENOENT") {
       throw error;
