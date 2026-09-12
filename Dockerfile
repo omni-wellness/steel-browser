@@ -66,6 +66,9 @@ RUN cd api/extensions/recorder && npm prune --omit=dev && cd -
 # Stage 3: Production
 FROM base AS production
 
+ARG SELENIUM_VERSION=4.48.0
+ARG SELENIUM_SHA256=c3119218bcd07b221622ffd57874519891718029358c85a2dccf506e17815cd7
+
 RUN apk add --no-cache \
     chromium \
     chromium-chromedriver \
@@ -86,6 +89,16 @@ RUN mkdir -p /files
 
 # Copy the built API from api-build stage
 COPY --from=api-build /app /app
+
+# Keep optional Selenium sessions patched and reproducible. npm is only needed in
+# the build stages; the runtime entrypoint executes Node directly.
+RUN wget -q \
+      "https://github.com/SeleniumHQ/selenium/releases/download/selenium-${SELENIUM_VERSION}/selenium-server-${SELENIUM_VERSION}.jar" \
+      -O /tmp/selenium-server.jar && \
+    echo "${SELENIUM_SHA256}  /tmp/selenium-server.jar" | sha256sum -c - && \
+    mv /tmp/selenium-server.jar /app/api/selenium/server/selenium-server.jar && \
+    rm -rf /usr/local/lib/node_modules/npm && \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx
 
 # Copy the built UI from ui-build stage into the API container
 COPY --from=ui-build /app/ui/dist /app/ui/dist

@@ -31,9 +31,22 @@
     "@types/lodash-es": "^4.17.12",
     "fastify": "^5.2.1",
     "husky": "^9.1.7",
-    "lodash-es": "^4.17.21"
+    "lodash-es": "^4.17.21",
+    "tar": "7.5.22"
   },
   "overrides": {
+    "@mapbox/node-pre-gyp": {
+      "tar": "7.5.22"
+    },
+    "cacache": {
+      "tar": "7.5.22"
+    },
+    "giget": {
+      "tar": "7.5.22"
+    },
+    "node-gyp": {
+      "tar": "7.5.22"
+    },
     "tar-fs": ">=3.1.1"
   }
 }
