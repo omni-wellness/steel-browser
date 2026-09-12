@@ -1,6 +1,6 @@
-ARG NODE_VERSION=22.13.0
+ARG NODE_IMAGE=node@sha256:b74031e546d7f4faf561d797ac1b76beccac856a042815ca77db4fd047581605
 
-FROM node:${NODE_VERSION} AS base
+FROM ${NODE_IMAGE} AS base
 
 WORKDIR /app
 
@@ -8,19 +8,15 @@ ENV NODE_ENV="production" \
     PUPPETEER_CACHE_DIR=/app/.cache \
     DISPLAY=:10 \
     PATH="/usr/bin:/app/selenium/driver:${PATH}" \
-    CHROME_BIN=/usr/bin/chromium \
-    CHROME_PATH=/usr/bin/chromium
+    CHROME_BIN=/usr/bin/chromium-browser \
+    CHROME_PATH=/usr/bin/chromium-browser
 
-LABEL org.opencontainers.image.source="https://github.com/steel-dev/steel-browser"
+LABEL org.opencontainers.image.source="https://github.com/omni-wellness/steel-browser"
 
-# Install dependencies
-RUN rm -f /etc/apt/apt.conf.d/docker-clean; \
-    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache; \
-    apt-get update -qq && \
-    DEBIAN_FRONTEND=noninteractive apt-get -yq dist-upgrade
+RUN apk upgrade --no-cache
 
 # Stage 1: Build UI
-FROM node:${NODE_VERSION} AS ui-build
+FROM ${NODE_IMAGE} AS ui-build
 
 WORKDIR /app
 
@@ -35,12 +31,11 @@ RUN VITE_API_URL="" VITE_WS_URL="" npm run build -w ui -- --base=/ui
 # Stage 2: Build API
 FROM base AS api-build
 
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential \
-    pkg-config \
-    python-is-python3 \
-    xvfb
+RUN apk add --no-cache \
+    build-base \
+    linux-headers \
+    pkgconf \
+    python3
 
 # Copy root workspace files for API build
 COPY --link package.json package-lock.json ./
@@ -71,39 +66,21 @@ RUN cd api/extensions/recorder && npm prune --omit=dev && cd -
 # Stage 3: Production
 FROM base AS production
 
-# Install production dependencies
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
-    wget \
-    nginx \
-    gnupg \
-    fonts-ipafont-gothic \
-    fonts-wqy-zenhei \
-    fonts-thai-tlwg \
-    fonts-kacst \
-    fonts-freefont-ttf \
-    libxss1 \
-    xvfb \
+RUN apk add --no-cache \
+    chromium \
+    chromium-chromedriver \
     curl \
-    unzip \
     dbus \
-    dbus-x11 \
+    font-freefont \
+    font-noto-cjk \
+    font-noto-thai \
+    gcompat \
+    nginx \
     procps \
-    x11-xserver-utils
-
-# Install Chrome and ChromeDriver
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    wget \
-    ca-certificates \
-    curl \
+    tini \
     unzip \
-    # Download and install Chromium
-    && apt-get install -y chromium chromium-driver \
-    # Clean up
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /var/cache/apt/*
+    wget \
+    xvfb
 
 RUN mkdir -p /files
 
@@ -121,4 +98,4 @@ EXPOSE 3000 9223
 ENV HOST_IP=localhost \
     DBUS_SESSION_BUS_ADDRESS=autolaunch:
 
-ENTRYPOINT ["/app/api/entrypoint.sh"]
+ENTRYPOINT ["/sbin/tini", "-g", "--", "/app/api/entrypoint.sh"]
