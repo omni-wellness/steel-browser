@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const expected = process.env.PUPPETEER_PROVIDER;
 const providers = {
@@ -9,8 +11,20 @@ const providers = {
 
 assert.ok(expected in providers, "PUPPETEER_PROVIDER must be puppeteer or rebrowser");
 
-const packageUrl = new URL("../../node_modules/puppeteer-core/package.json", import.meta.url);
-const packageBody = JSON.parse(await readFile(packageUrl, "utf8"));
+let packageDirectory = dirname(fileURLToPath(import.meta.resolve("puppeteer-core")));
+let packageBody;
+for (let depth = 0; depth < 12; depth += 1) {
+  try {
+    packageBody = JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8"));
+    break;
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+    packageDirectory = dirname(packageDirectory);
+  }
+}
+assert.ok(packageBody, "could not locate the installed puppeteer-core package metadata");
 assert.equal(packageBody.name, providers[expected].name);
 assert.equal(packageBody.version, providers[expected].version);
 
