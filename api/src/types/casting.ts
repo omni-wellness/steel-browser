@@ -6,6 +6,7 @@ export type MouseEvent = {
     x: number;
     y: number;
     button: "none" | "left" | "middle" | "right";
+    buttons?: number;
     modifiers: number;
     clickCount?: number;
     deltaX?: number;

@@ -1,6 +1,6 @@
-ARG NODE_VERSION=22.13.0
+ARG NODE_IMAGE=node@sha256:b74031e546d7f4faf561d797ac1b76beccac856a042815ca77db4fd047581605
 
-FROM node:${NODE_VERSION} AS base
+FROM ${NODE_IMAGE} AS base
 
 WORKDIR /app
 
@@ -8,19 +8,15 @@ ENV NODE_ENV="production" \
     PUPPETEER_CACHE_DIR=/app/.cache \
     DISPLAY=:10 \
     PATH="/usr/bin:/app/selenium/driver:${PATH}" \
-    CHROME_BIN=/usr/bin/chromium \
-    CHROME_PATH=/usr/bin/chromium
+    CHROME_BIN=/usr/bin/chromium-browser \
+    CHROME_PATH=/usr/bin/chromium-browser
 
-LABEL org.opencontainers.image.source="https://github.com/steel-dev/steel-browser"
+LABEL org.opencontainers.image.source="https://github.com/omni-wellness/steel-browser"
 
-# Install dependencies
-RUN rm -f /etc/apt/apt.conf.d/docker-clean; \
-    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache; \
-    apt-get update -qq && \
-    DEBIAN_FRONTEND=noninteractive apt-get -yq dist-upgrade
+RUN apk upgrade --no-cache
 
 # Stage 1: Build UI
-FROM node:${NODE_VERSION} AS ui-build
+FROM ${NODE_IMAGE} AS ui-build
 
 WORKDIR /app
 
@@ -35,12 +31,11 @@ RUN VITE_API_URL="" VITE_WS_URL="" npm run build -w ui -- --base=/ui
 # Stage 2: Build API
 FROM base AS api-build
 
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential \
-    pkg-config \
-    python-is-python3 \
-    xvfb
+RUN apk add --no-cache \
+    build-base \
+    linux-headers \
+    pkgconf \
+    python3
 
 # Copy root workspace files for API build
 COPY --link package.json package-lock.json ./
@@ -71,44 +66,39 @@ RUN cd api/extensions/recorder && npm prune --omit=dev && cd -
 # Stage 3: Production
 FROM base AS production
 
-# Install production dependencies
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
-    wget \
-    nginx \
-    gnupg \
-    fonts-ipafont-gothic \
-    fonts-wqy-zenhei \
-    fonts-thai-tlwg \
-    fonts-kacst \
-    fonts-freefont-ttf \
-    libxss1 \
-    xvfb \
-    curl \
-    unzip \
-    dbus \
-    dbus-x11 \
-    procps \
-    x11-xserver-utils
+ARG SELENIUM_VERSION=4.48.0
+ARG SELENIUM_SHA256=c3119218bcd07b221622ffd57874519891718029358c85a2dccf506e17815cd7
 
-# Install Chrome and ChromeDriver
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    wget \
-    ca-certificates \
+RUN apk add --no-cache \
+    chromium \
+    chromium-chromedriver \
     curl \
+    dbus \
+    font-freefont \
+    font-noto-cjk \
+    font-noto-thai \
+    gcompat \
+    nginx \
+    procps \
+    tini \
     unzip \
-    # Download and install Chromium
-    && apt-get install -y chromium chromium-driver \
-    # Clean up
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /var/cache/apt/*
+    wget \
+    xvfb
 
 RUN mkdir -p /files
 
 # Copy the built API from api-build stage
 COPY --from=api-build /app /app
+
+# Keep optional Selenium sessions patched and reproducible. npm is only needed in
+# the build stages; the runtime entrypoint executes Node directly.
+RUN wget -q \
+      "https://github.com/SeleniumHQ/selenium/releases/download/selenium-${SELENIUM_VERSION}/selenium-server-${SELENIUM_VERSION}.jar" \
+      -O /tmp/selenium-server.jar && \
+    echo "${SELENIUM_SHA256}  /tmp/selenium-server.jar" | sha256sum -c - && \
+    mv /tmp/selenium-server.jar /app/api/selenium/server/selenium-server.jar && \
+    rm -rf /usr/local/lib/node_modules/npm && \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx
 
 # Copy the built UI from ui-build stage into the API container
 COPY --from=ui-build /app/ui/dist /app/ui/dist
@@ -121,4 +111,4 @@ EXPOSE 3000 9223
 ENV HOST_IP=localhost \
     DBUS_SESSION_BUS_ADDRESS=autolaunch:
 
-ENTRYPOINT ["/app/api/entrypoint.sh"]
+ENTRYPOINT ["/sbin/tini", "-g", "--", "/app/api/entrypoint.sh"]

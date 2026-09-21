@@ -1558,8 +1558,13 @@ export class CDPService extends EventEmitter {
     }
 
     const userAgent = this.getUserAgent() ?? "";
-    const session = await page.createCDPSession();
+    let session: CDPSession | null = null;
     try {
+      if (page.isClosed()) {
+        this.logger.debug("[CDPService] Target closed before device metrics setup");
+        return;
+      }
+      session = await page.createCDPSession();
       await session.send("Page.setDeviceMetricsOverride", {
         screenWidth: screen.width,
         screenHeight: screen.height,
@@ -1573,8 +1578,14 @@ export class CDPService extends EventEmitter {
             : { angle: 90, type: "landscapePrimary" },
         deviceScaleFactor: screen.devicePixelRatio,
       });
+    } catch (error) {
+      if (isTargetClosedError(error) || page.isClosed()) {
+        this.logger.debug("[CDPService] Target closed during device metrics setup");
+        return;
+      }
+      throw error;
     } finally {
-      await session.detach().catch(() => {});
+      await session?.detach().catch(() => {});
     }
   }
 
