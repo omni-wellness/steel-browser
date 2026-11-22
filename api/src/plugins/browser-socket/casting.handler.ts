@@ -15,6 +15,8 @@ import {
 } from "../../types/casting.js";
 import { getPageFavicon, getPageTitle, navigatePage } from "../../utils/casting.js";
 
+const CAST_METADATA_REFRESH_MS = 250;
+
 export async function handleCastSession(
   request: IncomingMessage,
   socket: Duplex,
@@ -406,38 +408,85 @@ export async function handleCastSession(
           deviceScaleFactor: isMobile ? 3 : 1,
         });
 
+        const castPage = targetPage;
+        const initialUrl = castPage.url();
+        const [title, favicon] = await Promise.all([getPageTitle(castPage), getPageFavicon(castPage)]);
+        if (ws.readyState !== WebSocket.OPEN) {
+          handleSessionCleanup();
+          return;
+        }
+        let metadata = { url: initialUrl, title, favicon };
+        let lastMetadataCheck = performance.now();
+        let metadataPending = false;
+        let metadataTimer: NodeJS.Timeout | undefined;
+
+        const refreshMetadata = (url: string) => {
+          if (metadataPending) return;
+          metadataPending = true;
+          const delay = url === metadata.url
+            ? Math.max(0, CAST_METADATA_REFRESH_MS - (performance.now() - lastMetadataCheck))
+            : 0;
+          metadataTimer = setTimeout(async () => {
+            metadataTimer = undefined;
+            try {
+              if (ws.readyState !== WebSocket.OPEN) return;
+              lastMetadataCheck = performance.now();
+              const observedUrl = castPage.url();
+              const [title, favicon] = await Promise.all([getPageTitle(castPage), getPageFavicon(castPage)]);
+              if (ws.readyState !== WebSocket.OPEN || castPage.url() !== observedUrl) return;
+              if (observedUrl !== metadata.url || title !== metadata.title || favicon !== metadata.favicon) {
+                metadata = { url: observedUrl, title, favicon };
+                ws.send(JSON.stringify({ type: "tabUpdate", pageId: targetPageId, ...metadata }));
+              }
+            } catch (error) {
+              console.error("Error updating cast tab metadata:", error);
+            } finally {
+              metadataPending = false;
+            }
+          }, delay);
+        };
+
+        let pendingFrame: { url: string; data: string } | undefined;
+        let sendingFrame = false;
+        const sendLatestFrame = () => {
+          if (sendingFrame || !pendingFrame || ws.readyState !== WebSocket.OPEN) return;
+          const frame = pendingFrame;
+          pendingFrame = undefined;
+          sendingFrame = true;
+          ws.send(JSON.stringify({ pageId: targetPageId, ...metadata, ...frame }), (error) => {
+            sendingFrame = false;
+            if (error) {
+              pendingFrame = undefined;
+              console.error("Error sending cast frame:", error);
+              return;
+            }
+            sendLatestFrame();
+          });
+        };
+
+        // Handle screencast frames
+        targetClient.on("Page.screencastFrame", ({ data, sessionId }) => {
+          // Acknowledge every CDP frame, even when a newer frame replaces it.
+          void targetClient?.send("Page.screencastFrameAck", { sessionId }).catch((error) => {
+            console.error("Error acknowledging cast frame:", error);
+          });
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const url = castPage.url();
+          refreshMetadata(url);
+          // Keep only the latest waiting frame while the socket is writing.
+          pendingFrame = { url, data };
+          sendLatestFrame();
+        });
+        ws.once("close", () => {
+          if (metadataTimer) clearTimeout(metadataTimer);
+          pendingFrame = undefined;
+        });
+
         await targetClient.send("Page.startScreencast", {
           format: "jpeg",
           quality: 75,
           maxWidth: width,
           maxHeight: height,
-        });
-
-        // Handle screencast frames
-        targetClient.on("Page.screencastFrame", async ({ data, sessionId }) => {
-          try {
-            // Acknowledge the frame right away to free up memory
-            await targetClient?.send("Page.screencastFrameAck", { sessionId });
-
-            if (ws.readyState === WebSocket.OPEN) {
-              // Get page metadata
-              const title = await getPageTitle(targetPage!);
-              const favicon = await getPageFavicon(targetPage!);
-
-              // Send frame data
-              ws.send(
-                JSON.stringify({
-                  pageId: targetPageId,
-                  url: targetPage?.url(),
-                  title,
-                  favicon,
-                  data,
-                }),
-              );
-            }
-          } catch (err) {
-            console.error("Error in Page.screencastFrame handler:", err);
-          }
         });
 
         // Cleanup when target is destroyed

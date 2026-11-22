@@ -584,6 +584,49 @@
               // Create a new WebSocket for this tab
               const ws = new WebSocket(createWebSocketUrl(pageId));
               console.log(`Connecting websocket for tab ${pageId}`);
+              let pendingImageData = null;
+              let decodingFrame = false;
+              let lastPublishedUrl;
+              let lastPublishedFavicon;
+
+              function publishNavigation(tab) {
+                  if (tab.url === lastPublishedUrl && tab.favicon === lastPublishedFavicon) return;
+                  lastPublishedUrl = tab.url;
+                  lastPublishedFavicon = tab.favicon;
+                  window.parent.postMessage({
+                      type: 'navigation',
+                      url: tab.url,
+                      favicon: tab.favicon
+                  }, '*');
+              }
+
+              function renderLatestFrame() {
+                  if (decodingFrame || !pendingImageData || tabs[pageId]?.websocket !== ws) return;
+                  const img = new Image();
+                  const source = pendingImageData;
+                  pendingImageData = null;
+                  decodingFrame = true;
+                  const next = () => {
+                      img.onload = null;
+                      img.onerror = null;
+                      decodingFrame = false;
+                      renderLatestFrame();
+                  };
+                  img.onload = () => {
+                      try {
+                          const tab = tabs[pageId];
+                          if (!tab || tab.websocket !== ws || ws.readyState !== WebSocket.OPEN) return;
+                          tab.lastImage = img;
+                          tab.currentImageWidth = img.naturalWidth;
+                          tab.currentImageHeight = img.naturalHeight;
+                          updateCanvasSize(pageId, img);
+                      } finally {
+                          next();
+                      }
+                  };
+                  img.onerror = next;
+                  img.src = source;
+              }
 
               if (tabs[pageId]) {
                   tabs[pageId].websocket = ws;
@@ -622,6 +665,7 @@
 
               ws.onclose = () => {
                   console.log(`WebSocket connection closed for tab ${pageId}`);
+                  pendingImageData = null;
 
                   if (tabs[pageId]) {
                       // Only show error if this wasn't an intentional close
@@ -690,7 +734,11 @@
                       }
                       return;
                   } else if (payload.type === "tabUpdate") {
-                      updateTabInfo(pageId, payload.url, payload.title, payload.favicon);
+                      const tab = tabs[pageId];
+                      if (tab && tab.websocket === ws) {
+                          updateTabInfo(pageId, payload.url, payload.title, payload.favicon);
+                          publishNavigation(tab);
+                      }
                       return;
                   } else if (payload.type === "targetClosed") {
                       handleTabClosed(pageId);
@@ -698,62 +746,26 @@
                   }
 
                   // Handle canvas image data
-                  if (payload.data) {
-                      if (!tabs[pageId]) {
-                          // console.error(`Received data for nonexistent tab ${pageId}`);
-                          return;
-                      }
+                  const tab = tabs[pageId];
+                  if (!payload.data || !tab || tab.websocket !== ws) return;
 
-                      // Remove tab switching indicator when we receive the first frame
-                      tabs[pageId].canvasContainer.classList.remove('tab-switching');
-
-                      // Mark that we've received at least one frame for this tab
-                      tabs[pageId].receivedFirstFrame = true;
-                      if(urlText) urlText.disabled = false;
-
-                      if (urlText && document.activeElement !== urlText){
-                        updateUrlBar(payload.url);
-                        updateSecurityIcon(payload.url);
-                        updateTabInfo(pageId, payload.url, payload.title, payload.favicon);
-                      }
-
-                      // Track frame count for loading state
-                      if (tabs[pageId].isLoading) {
-                          tabs[pageId].frameCount++;
-
-                          // After receiving 2 frames, turn off loading state
-                          if (tabs[pageId].frameCount >= 2) {
-                              setTabLoadingState(pageId, false);
-                          }
-                      }
-                      window.parent.postMessage({
-                          type: 'navigation',
-                          url: payload.url,
-                          favicon: payload.favicon
-                      }, '*');
-
-                const img = new Image();
-                      const imageData = 'data:image/jpeg;base64,' + payload.data;
-                      tabs[pageId].lastImageData = imageData;
-
-                img.onload = () => {
-                          tabs[pageId].currentImageWidth = img.naturalWidth;
-                          tabs[pageId].currentImageHeight = img.naturalHeight;
-                          updateCanvasSize(pageId);
-
-                          tabs[pageId].ctx.drawImage(
-                        img,
-                        0,
-                        0,
-                              Math.floor(tabs[pageId].canvas.width / window.devicePixelRatio),
-                              Math.floor(tabs[pageId].canvas.height / window.devicePixelRatio)
-                          );
-
-                          tabs[pageId].canvasContainer.style.backgroundColor = 'var(--bg-secondary)';
-                      };
-
-                      img.src = imageData;
+                  if (!tab.receivedFirstFrame) {
+                      tab.canvasContainer.classList.remove('tab-switching');
+                      tab.canvasContainer.style.backgroundColor = 'var(--bg-secondary)';
+                      tab.receivedFirstFrame = true;
                   }
+                  if (urlText && urlText.disabled) urlText.disabled = false;
+
+                  updateTabInfo(pageId, payload.url, payload.title, payload.favicon);
+                  publishNavigation(tab);
+
+                  if (tab.isLoading && ++tab.frameCount >= 2) {
+                      setTabLoadingState(pageId, false);
+                  }
+
+                  // While the decoder is busy, keep only the newest waiting frame.
+                  pendingImageData = 'data:image/jpeg;base64,' + payload.data;
+                  renderLatestFrame();
               };
 
               return ws;
@@ -827,6 +839,8 @@
               // Create canvas element
               const canvas = document.createElement('canvas');
               canvas.className = 'canvas';
+              canvas.style.height = '100%';
+              canvas.style.width = 'auto';
               canvasContainer.appendChild(canvas);
 
               // Initialize canvas context here
@@ -846,7 +860,7 @@
                   intentionalClose: false,
                   currentImageWidth: defaultWidth,
                   currentImageHeight: defaultHeight,
-                  lastImageData: null,
+                  lastImage: null,
                   receivedFirstFrame: false,
                   isLoading: false,
                   frameCount: 0,
@@ -1308,20 +1322,23 @@
               // console.log(`Updating tab ${pageId}:`, {url, title, favicon});
 
               const tabData = tabs[pageId];
+              const urlChanged = url !== undefined && url !== tabData.url;
+              const titleChanged = title !== undefined && title !== tabData.title;
+              const faviconChanged = favicon !== undefined && favicon !== tabData.favicon;
 
               // Update the tab's stored data
-              if (url !== undefined) tabData.url = url;
-              if (title !== undefined) tabData.title = title;
-              if (favicon !== undefined) tabData.favicon = favicon;
+              if (urlChanged) tabData.url = url;
+              if (titleChanged) tabData.title = title;
+              if (faviconChanged) tabData.favicon = favicon;
 
               // Update the tab's title element
-              const titleElem = tabData.tab.querySelector('.tab-title');
+              const titleElem = titleChanged && tabData.tab.querySelector('.tab-title');
               if (titleElem) {
                   titleElem.textContent = tabData.title || 'New Tab';
               }
 
               // Update favicon if available
-              const faviconElem = tabData.tab.querySelector('.tab-favicon');
+              const faviconElem = faviconChanged && tabData.tab.querySelector('.tab-favicon');
               if (faviconElem && tabData.favicon) {
                   faviconElem.src = tabData.favicon;
                   faviconElem.style.display = 'block';
@@ -1331,8 +1348,10 @@
 
               // Only update URL bar and security icon if this is the active tab
               if (activeTabId === pageId) {
-                  updateUrlBar(tabData.url || '');
-                  updateSecurityIcon(tabData.url || '');
+                  if (urlText && document.activeElement !== urlText && urlText.value !== tabData.url) {
+                      updateUrlBar(tabData.url || '');
+                  }
+                  if (urlChanged) updateSecurityIcon(tabData.url || '');
               }
           }
 
@@ -1441,8 +1460,7 @@
               }
           }
 
-          // Add the missing updateCanvasSize function
-          function updateCanvasSize(pageId) {
+          function updateCanvasSize(pageId, frame = null) {
               if (!tabs[pageId]) return;
 
               const tabData = tabs[pageId];
@@ -1464,30 +1482,16 @@
               // Account for device pixel ratio
               const dpr = window.devicePixelRatio || 1;
 
-              canvas.width = targetWidth * dpr;
-              canvas.height = targetHeight * dpr;
+              const width = Math.floor(targetWidth * dpr);
+              const height = Math.floor(targetHeight * dpr);
+              const resized = canvas.width !== width || canvas.height !== height;
+              if (canvas.width !== width) canvas.width = width;
+              if (canvas.height !== height) canvas.height = height;
 
-              // Reset transform before scaling
-              ctx.setTransform(1, 0, 0, 1, 0, 0);
-              ctx.scale(dpr, dpr);
-
-              // Set display size
-              canvas.style.height = '100%';
-              canvas.style.width = 'auto';
-
-              // Redraw the last image if available
-              if (tabData.lastImageData) {
-                  const img = new Image();
-                  img.onload = () => {
-                      ctx.drawImage(
-                          img,
-                          0,
-                          0,
-                          Math.floor(canvas.width / window.devicePixelRatio),
-                          Math.floor(canvas.height / window.devicePixelRatio)
-                      );
-                  };
-                  img.src = tabData.lastImageData;
+              const image = frame || (resized && tabData.lastImage);
+              if (image) {
+                  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                  ctx.drawImage(image, 0, 0, Math.floor(width / dpr), Math.floor(height / dpr));
               }
           }
 
