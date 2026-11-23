@@ -315,10 +315,18 @@ export async function handleCastSession(
               }
               case "keyEvent": {
                 const { event } = data as KeyEvent;
+                // CDP needs Enter's character to trigger native form submission
+                // and textarea line breaks. The viewer sends only its key/code.
+                const text =
+                  event.type === "keyDown" &&
+                  event.key === "Enter" &&
+                  !((event.modifiers || 0) & 7)
+                    ? "\r"
+                    : event.text;
                 await targetClient.send("Input.dispatchKeyEvent", {
                   type: event.type,
-                  text: event.text,
-                  unmodifiedText: event.text ? event.text.toLowerCase() : undefined,
+                  text,
+                  unmodifiedText: text ? text.toLowerCase() : undefined,
                   code: event.code,
                   key: event.key,
                   windowsVirtualKeyCode: event.keyCode,
